@@ -1,4 +1,4 @@
-name: tangram-env
+name: tangramx-env
 dependencies:
   - python>=3.8.5
   - pip=20.2.2
