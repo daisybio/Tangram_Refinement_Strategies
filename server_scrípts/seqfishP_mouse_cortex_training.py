@@ -6,7 +6,7 @@ import anndata as an
 import matplotlib.pyplot as plt
 import sklearn
 import tangram_modified_version as tg
-import tangram_add_ons as tgx
+import benchmarking as tgx
 import pickle 
 import sys
 import os

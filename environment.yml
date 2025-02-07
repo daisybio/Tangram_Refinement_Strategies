@@ -10,7 +10,11 @@ dependencies:
   - nb_conda=2.2.1
   - pip:
     - numpy>=1.22
+    - numba==0.58.1
     - pandas==1.2.0
+    - zipp==3.20
     - scanpy>=1.6.0
     - scikit-learn
     - tqdm
+    - libpysal
+    - squidpy

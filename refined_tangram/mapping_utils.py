@@ -5,6 +5,7 @@
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import squidpy as sq
 import torch
 import logging
 
@@ -18,7 +19,8 @@ from . import utils as ut
 #from ray import tune
 #from ray.tune.search.optuna import OptunaSearch
 
-import tangram_add_ons as tgx
+import benchmarking
+from . import spatial_weights as sw
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -95,6 +97,9 @@ def pp_adatas(adata_sc, adata_sp, genes=None, gene_to_lowercase = True):
     logging.info(
         f"rna count based density prior is calculated and saved in `obs``rna_count_based_density` of the spatial Anndata."
     )
+
+    # Compute spatial neighbors needed for the neighborhood extension of Tangram
+    sq.gr.spatial_neighbors(adata_sp, set_diag=False)
         
 
 def adata_to_cluster_expression(adata, cluster_label, scale=True, add_density=True):
@@ -158,14 +163,10 @@ def map_cells_to_space(
     target_count=None,
     lambda_sparsity_g1=0,
     lambda_neighborhood_g1=0,
-    voxel_weights=None,
     lambda_ct_islands=0,
-    neighborhood_filter=None,
-    ct_encode=None,
     lambda_getis_ord=0,
     lambda_moran=0,
     lambda_geary=0,
-    spatial_weights=None,
     random_state=None,
     verbose=True,
     density_prior='rna_count_based',
@@ -196,14 +197,10 @@ def map_cells_to_space(
         target_count (int): Optional. The number of cells to be filtered. Default is None.
         lambda_sparsity_g1 (float): Optional. Strength of sparsity weighted gene expression comparison. Default is 0.
         lambda_neighborhood_g1 (float): Optional. Strength of neighborhood weighted gene expression comparison. Default is 0.
-        voxel_weights (ndarray): Optional. Spatial weight used for neighborhood weighting, shape = (number_spots, number_spots).
         lambda_getis_ord (float): Optional. Strength of Getis-Ord G* preservation. Default is 0.
         lambda_geary (float): Optional. Strength of Geary's C preservation. Default is 0.
         lambda_moran (float): Optional. Strength of Moran's I preservation. Default is 0.
-        spatial_weights (ndarray): Optional. Spatial weight used for local spatial indicator preservation, shape = (number_spots, number_spots).
         lambda_ct_islands: Optional. Strength of ct islands enforcement. Default is 0.
-        neighborhood_filter (ndarray): Optional. Neighborhood filter used for cell type island preservation, shape = (number_spots, number_spots).
-        ct_encode(ndarray): Optional. One-hot encoding of cell types used for cell type island preservation, shape = (number_cells, number_celltypes).
         random_state (int): Optional. pass an int to reproduce training. Default is None.
         verbose (bool): Optional. If print training details. Default is True.
         density_prior (str, ndarray or None): Spatial density of spots, when is a string, value can be 'rna_count_based' or 'uniform', when is a ndarray, shape = (number_spots,). This array should satisfy the constraints sum() == 1. If None, the density term is ignored. Default value is 'rna_count_based'.
@@ -326,6 +323,17 @@ def map_cells_to_space(
         print_each = None
 
     if mode in ["cells", "clusters"]:
+        voxel_weights,neighborhood_filter,ct_encode,spatial_weights = None,None,None,None
+        if lambda_neighborhood_g1 > 0:
+            voxel_weights = sw.spatial_weights(adata_sp, standardized=True, self_inclusion=True)
+        if lambda_ct_islands > 0:
+            neighborhood_filter = sw.spatial_weights(adata_sp, standardized=False, self_inclusion=False)
+            ct_encode = ut.one_hot_encoding(adata_sc.obs["cell_subclass"]).values
+        if lambda_moran > 0 or lambda_geary > 0:
+            spatial_weights = sw.spatial_weights(adata_sp, standardized=True, self_inclusion=False)
+        if lambda_getis_ord > 0:
+            spatial_weights = sw.spatial_weights(adata_sp, standardized=False, self_inclusion=True)
+
         hyperparameters = {
             "lambda_d": lambda_d,
             "lambda_g1": lambda_g1,
@@ -524,18 +532,17 @@ def train_multiple_Mapper(config,data):
 
     cell_mapping_cube = np.array(mapping_matrices)    
     gene_expr_cube = np.array([(S[:,val_genes_idx].T @ mapping_matrix) for mapping_matrix in mapping_matrices])
-    train.report({"cell_map_corr" : tgx.pearson_corr(cell_mapping_cube).mean(),
-                  "cell_map_vote_entropy" : tgx.vote_entropy(cell_mapping_cube).mean(),
-                  "cell_map_consensus_entropy" : tgx.consensus_entropy(cell_mapping_cube).mean(),
-                  "gene_corr" : tgx.pearson_corr(gene_expr_cube).mean(),
-                  "val_gene_score" : np.array(val_gene_scores).mean(),
-                  "val_sp_sparsity_weighted_score" : np.array(val_sp_sparsity_weighted_scores).mean(),
-                  "val_auc_score" : np.array(val_auc_scores).mean(),
-                  "val_prob_entropy" : np.array(val_prob_entropies).mean()})
+    train.report({"cell_map_consistency" : benchmarking.pearson_corr(cell_mapping_cube).mean(),
+                  "cell_map_agreement" : 1-benchmarking.vote_entropy(cell_mapping_cube).mean(),
+                  "cell_map_certainty" : 1-benchmarking.consensus_entropy(cell_mapping_cube).mean(),
+                  "gene_expr_consistency" : benchmarking.pearson_corr(gene_expr_cube).mean(),
+                  "gene_expr_correctness" : np.array(val_gene_scores).mean()})
 
 def map_cells_to_space_hyperparameter_tuning(
     adata_sc,
     adata_sp,
+    metric,
+    config,
     cv_train_genes=None,
     train_genes_idx=None,
     val_genes_idx=None,
@@ -543,221 +550,6 @@ def map_cells_to_space_hyperparameter_tuning(
     device="cpu",
     random_state=None,
     density_prior='rna_count_based',
-    voxel_weights=None,
-    ct_encode=None,
-    neighborhood_filter=None,
-    spatial_weights=None,
-    config=None,
-):
-    if (type(density_prior) is str) and (
-        density_prior not in ["rna_count_based", "uniform", None]
-    ):
-        raise ValueError("Invalid input for density_prior.")
-
-    if mode not in ["cells"]:
-        raise ValueError('Argument "mode" must be "cells"')
-
-    # Check if training_genes key exist/is valid in adatas.uns
-    if not set(["training_genes", "overlap_genes"]).issubset(set(adata_sc.uns.keys())):
-        raise ValueError("Missing tangram parameters. Run `pp_adatas()`.")
-
-    if not set(["training_genes", "overlap_genes"]).issubset(set(adata_sp.uns.keys())):
-        raise ValueError("Missing tangram parameters. Run `pp_adatas()`.")
-
-    assert list(adata_sp.uns["training_genes"]) == list(adata_sc.uns["training_genes"])
-
-    # get training_genes
-    if cv_train_genes is None:
-        training_genes = adata_sc.uns["training_genes"]
-    elif cv_train_genes is not None:
-        if set(cv_train_genes).issubset(set(adata_sc.uns["training_genes"])):
-            training_genes = cv_train_genes
-        else:
-            raise ValueError(
-                "Given training genes list should be subset of two AnnDatas."
-            )
-
-    logging.info("Allocate tensors for mapping.")
-    # Allocate tensors (AnnData matrix can be sparse or not)
-
-    if isinstance(adata_sc.X, csc_matrix) or isinstance(adata_sc.X, csr_matrix):
-        S = np.array(adata_sc[:, training_genes].X.toarray(), dtype="float32",)
-    elif isinstance(adata_sc.X, np.ndarray):
-        S = np.array(adata_sc[:, training_genes].X.toarray(), dtype="float32",)
-    else:
-        X_type = type(adata_sc.X)
-        logging.error("AnnData X has unrecognized type: {}".format(X_type))
-        raise NotImplementedError
-
-    if isinstance(adata_sp.X, csc_matrix) or isinstance(adata_sp.X, csr_matrix):
-        G = np.array(adata_sp[:, training_genes].X.toarray(), dtype="float32")
-    elif isinstance(adata_sp.X, np.ndarray):
-        G = np.array(adata_sp[:, training_genes].X, dtype="float32")
-    else:
-        X_type = type(adata_sp.X)
-        logging.error("AnnData X has unrecognized type: {}".format(X_type))
-        raise NotImplementedError
-
-    if not S.any(axis=0).all() or not G.any(axis=0).all():
-        raise ValueError("Genes with all zero values detected. Run `pp_adatas()`.")
-
-    d_source = None
-
-    # define density_prior if 'rna_count_based' is passed to the density_prior argument:
-    d_str = density_prior
-    if type(density_prior) is np.ndarray:
-        d_str = "customized"
-
-    if density_prior == "rna_count_based":
-        density_prior = adata_sp.obs["rna_count_based_density"]
-
-    # define density_prior if 'uniform' is passed to the density_prior argument:
-    elif density_prior == "uniform":
-        density_prior = adata_sp.obs["uniform_density"]
-
-    if mode == "cells":
-        d = density_prior
-
-    # Choose device
-    device = torch.device(device)  # for gpu
-
-    print_each = None
-
-    if mode in ["cells"]:
-        ray.init(address = "auto",_temp_dir='/nfs/home/students/m.stahl/ray/')
-        data = [S,G,d_source,d,device,random_state,print_each,voxel_weights,ct_encode,neighborhood_filter,spatial_weights,train_genes_idx,val_genes_idx]
-
-        optuna_search = OptunaSearch(
-            metric=["val_gene_score","val_auc_score","val_sp_sparsity_weighted_score","val_prob_entropy"],
-            mode=["max","max","max","min"])
-
-        tuner = tune.Tuner(
-            tune.with_resources(tune.with_parameters(train_Mapper,data=data), {"gpu": 1}),
-            tune_config=tune.TuneConfig(
-                search_alg=optuna_search,
-                num_samples=1,
-            ),
-            param_space=config,
-        )
-        tuner.fit()
-        return tuner
-    
-def map_cells_to_space_hyperparameter_grid_search(
-    adata_sc,
-    adata_sp,
-    cv_train_genes=None,
-    train_genes_idx=None,
-    val_genes_idx=None,
-    mode="cells",
-    device="cpu",
-    random_state=None,
-    verbose=True,
-    density_prior='rna_count_based',
-    ct_encode=None,
-    neighborhood_filter=None,
-    config=None,
-):
-
-    if (type(density_prior) is str) and (
-        density_prior not in ["rna_count_based", "uniform", None]
-    ):
-        raise ValueError("Invalid input for density_prior.")
-
-    if mode not in ["cells"]:
-        raise ValueError('Argument "mode" must be "cells"')
-
-    # Check if training_genes key exist/is valid in adatas.uns
-    if not set(["training_genes", "overlap_genes"]).issubset(set(adata_sc.uns.keys())):
-        raise ValueError("Missing tangram parameters. Run `pp_adatas()`.")
-
-    if not set(["training_genes", "overlap_genes"]).issubset(set(adata_sp.uns.keys())):
-        raise ValueError("Missing tangram parameters. Run `pp_adatas()`.")
-
-    assert list(adata_sp.uns["training_genes"]) == list(adata_sc.uns["training_genes"])
-
-    # get training_genes
-    if cv_train_genes is None:
-        training_genes = adata_sc.uns["training_genes"]
-    elif cv_train_genes is not None:
-        if set(cv_train_genes).issubset(set(adata_sc.uns["training_genes"])):
-            training_genes = cv_train_genes
-        else:
-            raise ValueError(
-                "Given training genes list should be subset of two AnnDatas."
-            )
-
-    logging.info("Allocate tensors for mapping.")
-    # Allocate tensors (AnnData matrix can be sparse or not)
-
-    if isinstance(adata_sc.X, csc_matrix) or isinstance(adata_sc.X, csr_matrix):
-        S = np.array(adata_sc[:, training_genes].X.toarray(), dtype="float32",)
-    elif isinstance(adata_sc.X, np.ndarray):
-        S = np.array(adata_sc[:, training_genes].X.toarray(), dtype="float32",)
-    else:
-        X_type = type(adata_sc.X)
-        logging.error("AnnData X has unrecognized type: {}".format(X_type))
-        raise NotImplementedError
-
-    if isinstance(adata_sp.X, csc_matrix) or isinstance(adata_sp.X, csr_matrix):
-        G = np.array(adata_sp[:, training_genes].X.toarray(), dtype="float32")
-    elif isinstance(adata_sp.X, np.ndarray):
-        G = np.array(adata_sp[:, training_genes].X, dtype="float32")
-    else:
-        X_type = type(adata_sp.X)
-        logging.error("AnnData X has unrecognized type: {}".format(X_type))
-        raise NotImplementedError
-
-    if not S.any(axis=0).all() or not G.any(axis=0).all():
-        raise ValueError("Genes with all zero values detected. Run `pp_adatas()`.")
-
-    d_source = None
-    if density_prior == "rna_count_based":
-        density_prior = adata_sp.obs["rna_count_based_density"]
-
-    # define density_prior if 'uniform' is passed to the density_prior argument:
-    elif density_prior == "uniform":
-        density_prior = adata_sp.obs["uniform_density"]
-
-    if mode == "cells":
-        d = density_prior
-
-    # Choose device
-    device = torch.device(device)  # for gpu
-
-    if verbose:
-        print_each = 10
-    else:
-        print_each = None
-
-    if mode in ["cells"]:
-        ray.init(address = "auto",_temp_dir='/nfs/home/students/m.stahl/ray/')
-        data = [S,G,d_source,d,device,random_state,print_each,ct_encode,neighborhood_filter,train_genes_idx,val_genes_idx]
-        origopt = ray.tune.search.basic_variant.BasicVariantGenerator(constant_grid_search=True)
-        tuner = tune.Tuner(
-            tune.with_resources(tune.with_parameters(train_Mapper,data=data), {"gpu": 1}),
-            tune_config=tune.TuneConfig(
-                search_alg=origopt,
-            ),
-            param_space=config,
-        )
-        tuner.fit()
-        return tuner
-
-def map_cells_to_space_hyperparameter_tuning_consistency(
-    adata_sc,
-    adata_sp,
-    cv_train_genes=None,
-    train_genes_idx=None,
-    val_genes_idx=None,
-    mode="cells",
-    device="cpu",
-    random_state=None,
-    density_prior='rna_count_based',
-    voxel_weights=None,
-    ct_encode=None,
-    neighborhood_filter=None,
-    spatial_weights=None,
-    config=None,
 ):
     if (type(density_prior) is str) and (
         density_prior not in ["rna_count_based", "uniform", None]
@@ -834,16 +626,8 @@ def map_cells_to_space_hyperparameter_tuning_consistency(
         data = [S,G,d_source,d,device,random_state,print_each,voxel_weights,ct_encode,neighborhood_filter,spatial_weights,train_genes_idx,val_genes_idx]
 
         optuna_search = OptunaSearch(
-            metric=["val_gene_score",
-                    "cell_map_corr",
-                    "cell_map_vote_entropy",
-                    "cell_map_consensus_entropy",
-                    ],
-            mode=["max",
-                  "max",
-                  "min",
-                  "min",
-                  ])
+            metric=metric,
+            mode=["max"] * len(metric))
 
         tuner = tune.Tuner(
             tune.with_resources(tune.with_parameters(train_multiple_Mapper,data=data), {"gpu": 1}),

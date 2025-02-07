@@ -821,3 +821,23 @@ def df_to_cell_types(df, cell_types):
             end_ind = j[i]
             cell_types_mapped[i].extend(j["centroids"][start_ind:end_ind].tolist())
     return cell_types_mapped
+
+def cell_type_mapping(adata_map, cell_types_key="cell_types"):
+    """
+    Compute the cell type mapping based on the cell mapping
+    Args:
+        adata_maps_pred (AnnData): Mapping data
+        cell_types_key (str): Optional. Key for cell type labels
+    
+    Returns:
+        None.
+        Update mapping AnnData by creating `varm` `ct_map` field which contains a dataframe with the cell type mapping
+    
+    """
+    df = tg.one_hot_encoding(adata_map.obs[cell_types_key])
+    df_ct_prob = adata_map.X.T @ df
+    df_ct_prob.index = adata_map.var.index
+    vmin = df_ct_prob.min() 
+    vmax = df_ct_prob.max()
+    df_ct_prob = (df_ct_prob - vmin) / (vmax - vmin) # per cell type normalization
+    adata_map.varm["ct_map"] = df_ct_prob

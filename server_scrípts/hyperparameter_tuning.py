@@ -4,7 +4,7 @@ import squidpy as sq
 import numpy as np
 import pandas as pd
 import tangram_modified_version as tg
-import tangram_add_ons as tgx
+import benchmarking as tgx
 import anndata as an
 import ray
 from ray import tune

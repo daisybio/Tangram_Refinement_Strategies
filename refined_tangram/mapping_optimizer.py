@@ -117,14 +117,24 @@ class Mapper:
         self.lambda_l2 = lambda_l2
 
         self.lambda_neighborhood_g1 = lambda_neighborhood_g1
-        self.voxel_weights = torch.tensor(voxel_weights, device=device, dtype=torch.float32)
+        self.voxel_weights = voxel_weights
+        if self.voxel_weights is not None: 
+            self.voxel_weights = torch.tensor(voxel_weights, device=device, dtype=torch.float32)
+        else:
+            self.voxel_weights = torch.zeros((self.G_train.shape[0],self.G_train.shape[0]), device=device, dtype=torch.float32)
 
         self.lambda_ct_islands = lambda_ct_islands
-        self.neighborhood_filter = torch.tensor(neighborhood_filter, device=device, dtype=torch.float32)
-        self.ct_encode = torch.tensor(ct_encode, device=device, dtype=torch.float32)
+        self.neighborhood_filter = neighborhood_filter
+        if self.neighborhood_filter is not None: 
+            self.neighborhood_filter = torch.tensor(neighborhood_filter, device=device, dtype=torch.float32)
+        self.ct_encode = ct_encode
+        if self.ct_encode is not None: 
+            self.ct_encode = torch.tensor(ct_encode, device=device, dtype=torch.float32)
 
-        self.spatial_weights = torch.tensor(spatial_weights, device=device, dtype=torch.float32)
-
+        self.spatial_weights = spatial_weights
+        if self.spatial_weights is not None:
+            self.spatial_weights = torch.tensor(spatial_weights, device=device, dtype=torch.float32)
+        
         self.lambda_getis_ord = lambda_getis_ord
         if self.lambda_getis_ord > 0:
             self.G_star = (self.spatial_weights @ self.G_train) / self.G_train.sum(axis=0)
@@ -208,6 +218,11 @@ class Mapper:
         l2_regularizer_term = self.lambda_l2 * (self.M ** 2).sum()
 
         main_loss = (gv_term / self.lambda_g1).tolist()
+        gv_neighborhood = (
+            (gv_neighborhood_term / self.lambda_sparsity_g1).tolist()
+            if self.lambda_sparsity_g1 != 0
+            else np.nan
+        )
         kl_reg = (
             (density_term / self.lambda_d).tolist()
             if density_term is not None
@@ -219,10 +234,14 @@ class Mapper:
         l1_reg = (l1_regularizer_term / self.lambda_l1).tolist()
         l2_reg = (l2_regularizer_term / self.lambda_l2).tolist()
 
-        ct_map = (M_probs.T @ self.ct_encode)
-        ct_island_penalty = self.lambda_ct_islands * (torch.max((ct_map) - (self.neighborhood_filter @ ct_map), 
-                                                      torch.tensor([0], device=self.device)).mean())
-        ct_island_penalty_report = (ct_island_penalty / self.lambda_ct_islands).tolist()
+        if self.lambda_ct_islands > 0:
+            ct_map = (M_probs.T @ self.ct_encode)
+            ct_island_penalty = self.lambda_ct_islands * (torch.max((ct_map) - (self.neighborhood_filter @ ct_map), 
+                                                        torch.tensor([0], dtype=torch.float32, device=self.device)).mean())
+            ct_island_penalty_report = (ct_island_penalty / self.lambda_ct_islands).tolist()
+        else:
+            ct_island_penalty = 0
+            ct_island_penalty_report = np.nan
 
         if self.lambda_getis_ord > 0:
             G_star_pred = (self.spatial_weights @ G_pred) / (G_pred.sum(axis=0))
@@ -230,7 +249,7 @@ class Mapper:
             G_star_sim_report = (G_star_sim / self.lambda_getis_ord).tolist()
         else:
             G_star_sim = 0
-            G_star_sim_report = 0
+            G_star_sim_report = np.nan
 
         if self.lambda_moran > 0:
             z = (G_pred - G_pred.mean(axis=0))
@@ -239,7 +258,7 @@ class Mapper:
             moran_I_sim_report = (moran_I_sim / self.lambda_moran).tolist()
         else:
             moran_I_sim = 0
-            moran_I_sim_report = 0
+            moran_I_sim_report = np.nan
 
         if self.lambda_geary > 0:
             m2 = ((G_pred - G_pred.mean(axis=0)) ** 2).sum(axis=0) / (G_pred.shape[0] - 1)
@@ -250,7 +269,7 @@ class Mapper:
             gearys_C_sim_report = (gearys_C_sim / self.lambda_geary).tolist()
         else:
             gearys_C_sim = 0
-            gearys_C_sim_report = 0
+            gearys_C_sim_report = np.nan
 
         total_loss = -expression_term - regularizer_term 
         total_loss += l1_regularizer_term 
@@ -263,8 +282,12 @@ class Mapper:
         total_loss -= gearys_C_sim
 
         if verbose:
-            term_numbers = [main_loss, vg_reg, kl_reg, entropy_reg, l1_reg, l2_reg, ct_island_penalty_report, G_star_sim_report, moran_I_sim_report, gearys_C_sim_report]
-            term_names = ["Score", "VG reg", "KL reg", "Entropy reg", "L1 reg", "L2 reg", "ct islands", "Getis-Ord G*", "Moran's I", "Geary's C"]
+            term_numbers = [main_loss, vg_reg, kl_reg, 
+                            entropy_reg, l1_reg, l2_reg, 
+                            gv_neighborhood, ct_island_penalty_report, G_star_sim_report, moran_I_sim_report, gearys_C_sim_report]
+            term_names = ["Gene-voxel score", "Voxel-gene score", "Cell densities reg", 
+                          "Entropy reg", "L1 reg", "L2 reg", 
+                          "Spatial weighted score", "Cell type islands score", "Getis-Ord G* score", "Moran\'s I score", "Geary\'s C score"]
 
             d = dict(zip(term_names, term_numbers))
             clean_dict = {k: d[k] for k in d if not np.isnan(d[k])}
