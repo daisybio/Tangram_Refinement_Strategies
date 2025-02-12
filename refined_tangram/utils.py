@@ -834,8 +834,12 @@ def cell_type_mapping(adata_map, cell_types_key="cell_types"):
         Update mapping AnnData by creating `varm` `ct_map` field which contains a dataframe with the cell type mapping
     
     """
-    df = tg.one_hot_encoding(adata_map.obs[cell_types_key])
-    df_ct_prob = adata_map.X.T @ df
+    df = one_hot_encoding(adata_map.obs[cell_types_key])
+    df_ct_prob = None
+    if "F_out" in adata_map.obs.keys():
+        df_ct_prob = adata_map[adata_map.obs["F_out"] >= 0.5].X.T @ df
+    else:
+        df_ct_prob = adata_map.X.T @ df
     df_ct_prob.index = adata_map.var.index
     vmin = df_ct_prob.min() 
     vmax = df_ct_prob.max()

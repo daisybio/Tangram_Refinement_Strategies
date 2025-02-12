@@ -1,6 +1,5 @@
 import sys
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 from . import metrics as m
@@ -29,17 +28,17 @@ def eval_metrics(adata_maps_pred, adata_sc, adata_st, adata_maps_true=None):
 
         cell_mapping_cube = np.array([adata_maps_pred[model][run].X for run in adata_maps_pred[model].keys()])
         metrics["cell_map_consistency"][model] = m.pearson_corr_over_axis(cell_mapping_cube, axis=1)
-        metrics["cell_map_agreement"][model] = m.vote_entropy(cell_mapping_cube)
-        metrics["cell_map_certainty"][model] = m.consensus_entropy(cell_mapping_cube)
+        metrics["cell_map_agreement"][model] = 1-m.vote_entropy(cell_mapping_cube)
+        metrics["cell_map_certainty"][model] = 1-m.consensus_entropy(cell_mapping_cube)
         if adata_maps_true is not None:
-            metrics["cell_map_correctness"][model] = m.categorical_cross_entropy(adata_maps_true.X, cell_mapping_cube)
+            metrics["cell_map_correctness"][model] = 1-m.categorical_cross_entropy(adata_maps_true.X, cell_mapping_cube)
 
         celltype_mapping_cube = np.array([adata_maps_pred[model][run].varm["ct_map"].values.T for run in adata_maps_pred[model].keys()])
         metrics["ct_map_consistency"][model] = m.pearson_corr_over_axis(celltype_mapping_cube, axis=1)
-        metrics["ct_map_agreement"][model] =  m.multi_label_vote_entropy(celltype_mapping_cube).tolist()
-        metrics["ct_map_certainty"][model] = m.multi_label_consensus_entropy(celltype_mapping_cube).tolist()
+        metrics["ct_map_agreement"][model] =  1-m.multi_label_vote_entropy(celltype_mapping_cube).tolist()
+        metrics["ct_map_certainty"][model] = 1-m.multi_label_consensus_entropy(celltype_mapping_cube).tolist()
         if adata_maps_true is not None:
-            metrics["ct_map_correctness"][model] = m.multi_label_categorical_cross_entropy(adata_maps_true.varm["ct_map"], celltype_mapping_cube)
+            metrics["ct_map_correctness"][model] = 1-m.multi_label_categorical_cross_entropy(adata_maps_true.varm["ct_map"], celltype_mapping_cube)
  
         gene_expr_cube = np.array([(adata_sc[:,test_genes].X.T @ adata_maps_pred[model][run].X) for run in adata_maps_pred[model].keys()])
         metrics["gene_expr_correctness"][model] = m.cosine_similarity(true_gene_expr, gene_expr_cube, 2).tolist()
@@ -69,17 +68,17 @@ def eval_metrics_constrained(adata_maps_pred, adata_sc, adata_st, adata_maps_tru
 
         cell_mapping_cube = np.array([np.array([adata_maps_pred[model][run].obs["F_out"]]).T * adata_maps_pred[model][run].X for run in adata_maps_pred[model].keys()])
         metrics["cell_map_consistency"][model] = m.pearson_corr_over_axis(cell_mapping_cube, axis=1)
-        metrics["cell_map_agreement"][model] = m.vote_entropy(cell_mapping_cube)
-        metrics["cell_map_certainty"][model] = m.consensus_entropy(cell_mapping_cube)
+        metrics["cell_map_agreement"][model] = 1-m.vote_entropy(cell_mapping_cube)
+        metrics["cell_map_certainty"][model] = 1-m.consensus_entropy(cell_mapping_cube)
         if adata_maps_true is not None:
-            metrics["cell_map_correctness"][model] = m.categorical_cross_entropy(adata_maps_true.X, cell_mapping_cube)
+            metrics["cell_map_correctness"][model] = 1-m.categorical_cross_entropy(adata_maps_true.X, cell_mapping_cube)
 
         celltype_mapping_cube = np.array([adata_maps_pred[model][run].varm["ct_map"].values.T for run in adata_maps_pred[model].keys()])
         metrics["ct_map_consistency"][model] = m.pearson_corr_over_axis(celltype_mapping_cube, axis=1)
-        metrics["ct_map_agreement"][model] =  m.multi_label_vote_entropy(celltype_mapping_cube).tolist()
-        metrics["ct_map_certainty"][model] = m.multi_label_consensus_entropy(celltype_mapping_cube).tolist()
+        metrics["ct_map_agreement"][model] =  1-m.multi_label_vote_entropy(celltype_mapping_cube).tolist()
+        metrics["ct_map_certainty"][model] = 1-m.multi_label_consensus_entropy(celltype_mapping_cube).tolist()
         if adata_maps_true is not None:
-            metrics["ct_map_correctness"][model] = m.multi_label_categorical_cross_entropy(adata_maps_true.varm["ct_map"], celltype_mapping_cube)
+            metrics["ct_map_correctness"][model] = 1-m.multi_label_categorical_cross_entropy(adata_maps_true.varm["ct_map"], celltype_mapping_cube)
  
         gene_expr_cube = np.array([((np.array([adata_maps_pred[model][run].obs["F_out"]]).T * adata_sc[:,test_genes].X).T @ adata_maps_pred[model][run].X) for run in adata_maps_pred[model].keys()])
         metrics["gene_expr_correctness"][model] = m.cosine_similarity(true_gene_expr, gene_expr_cube, 2).tolist()
@@ -87,5 +86,5 @@ def eval_metrics_constrained(adata_maps_pred, adata_sc, adata_st, adata_maps_tru
     
     return metrics
 
-def mean_metrics(metrics):
-    return pd.DataFrame({metric : {model : np.mean(metrics[metric][model]) for model in metrics[metric].keys()} for metric in metrics.keys()})
+def mean_metrics(metrics, axis=None):
+    return {metric : {model : np.mean(metrics[metric][model], axis=axis) for model in metrics[metric].keys()} for metric in metrics.keys()}

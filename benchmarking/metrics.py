@@ -41,7 +41,7 @@ def categorical_cross_entropy(true_probs, pred_probs_cube):
             tmp.append(sklearn.metrics.log_loss([true_probs[i].argmax()], np.array([pred_probs_cube[run,i]]), 
                                                 labels=range(true_probs.shape[1]), normalize=False))
         entropy.append(tmp)
-    return np.array(entropy)
+    return np.array(entropy) / np.array(entropy).mean(axis=0).max()
 
 def multi_label_categorical_cross_entropy(true_probs, pred_probs_cube):
     """
@@ -62,7 +62,7 @@ def multi_label_categorical_cross_entropy(true_probs, pred_probs_cube):
                                                 np.array([pred_probs_cube[run,i], 1-pred_probs_cube[run,i]]).T, 
                                                 labels=[0,1], normalize=True))
         entropy.append(tmp)
-    return np.array(entropy)
+    return np.array(entropy) / np.array(entropy).mean(axis=0).max()
 
 
 # METRICS FOR TRAINING RUN COMPARISONS
